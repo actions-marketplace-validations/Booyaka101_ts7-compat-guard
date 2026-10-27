@@ -28,9 +28,9 @@ Compiler-API conflicts are downgraded to warnings when the shim is present
 (removed tsconfig options are **not** downgraded — the shim restores the API,
 not the config options).
 
-> **Accuracy is the point.** It reads `package.json`, `tsconfig.json` and
-> installed `node_modules/*/package.json` versions only — it never parses your
-> source, so it never cries wolf. Things that TS7 *changes* but can't be proven
+> **Accuracy is the point.** It reads `package.json`, `tsconfig.json`, installed
+> `node_modules/*/package.json` versions and your lockfile only — it never
+> parses your source, so it never cries wolf. Things that TS7 *changes* but can't be proven
 > to break your code (decorator metadata, strict-by-default) are reported as
 > **advisories**, clearly separated from hard conflicts, and never fail your
 > build. A normal scan is fully **offline**; the only network command is the
@@ -44,10 +44,11 @@ Sources: [Announcing TypeScript 7.0 (Microsoft devblog)](https://devblogs.micros
 
 | Pillar | Source | Severity |
 |--------|--------|----------|
+| **Effective TypeScript version** (v3.2) — what will actually resolve, not what is declared | installed `node_modules/typescript` → lockfile → override pin → declared range | drives every severity below · `undetermined` when none of the four can answer |
 | **Compiler-API dependencies** — 25 packages that embed the removed programmatic API | `package.json` + installed versions | `conflict` on TS7 · `warning` on TS6/shim/partial · `notice` when the installed version satisfies `ts7Ready` |
 | **Installed-tree peer scan** (v3.1) — every installed package whose **bounded** `peerDependencies.typescript` range excludes the target TS (default 7.0.2). Catches **transitive** deps and packages the ledger has never heard of | `node_modules/**/package.json` (scoped, nested, pnpm `.pnpm` store) | `warning` (never fails) · `conflict` with `--strict-peers` |
 | **TS6 API shim** — `@typescript/typescript6`, both documented layouts | `package.json` | advisory line; downgrades Compiler-API conflicts to `warning` |
-| **Removed tsconfig options** — 17 options + `references.prepend`, with exact line numbers | `tsconfig.json` | `conflict` on TS7 · `warning` on TS6 (never downgraded by the shim) |
+| **Removed tsconfig options** — 20 options + `references.prepend`, with exact line numbers | `tsconfig.json` | `conflict` on TS7 · `warning` on TS6, except options TS 5.5 already removed, which are `conflict` there too (never downgraded by the shim) |
 | **Behavioural advisories** — `strict` default, `emitDecoratorMetadata`, `ignoreDeprecations` | `tsconfig.json` (+ dep context) | `advisory` (never fails) |
 
 Only `conflict`-severity findings (something that *will* break under TS7) fail a
@@ -121,11 +122,12 @@ correctly and exits 0:
 ```
 
 And a repo whose tooling has already caught up (a db entry with `ts7Ready`
-satisfied by the installed version) gets a notice, not a conflict:
+satisfied by the installed version) gets a notice, not a conflict. No entry
+has a `ts7Ready` range yet, so this one is hypothetical:
 
 ```
   [dependencies]
-  NOTICE: typescript-eslint 8.70.0 — TS7 supported since 8.70.0 (source: https://github.com/typescript-eslint/typescript-eslint/releases, checked 2026-07-29)
+  NOTICE: typescript-eslint 9.0.0 — TS7 supported since 9.0.0 (source: https://github.com/typescript-eslint/typescript-eslint/releases, checked 2026-09-27)
 
   1 notice(s) — all flagged dependencies have TypeScript 7 support.
 ```
@@ -154,6 +156,49 @@ proves an **install-time peer conflict**, not a runtime crash (pnpm, yarn and
 `npm --legacy-peer-deps` install straight through it). Add `--strict-peers` to
 make them `conflict`s and exit `1`.
 
+### Example — the effective TypeScript version (new in v3.2)
+
+A repo declaring `"typescript": "latest"` with `typescript-eslint`. As of
+2026-08-29 the npm dist-tag `latest` points at **7.0.2**, so `npm install`
+puts TypeScript 7 on disk and the lint run is already broken — v3.1 read
+`latest` as "not TS7" and exited 0. v3.2 reads what is installed:
+
+```
+=== TypeScript 7.0 / tsgo Readiness ===
+  typescript latest → TypeScript 7.0.2 detected (installed, via devDependencies)
+
+  [dependencies]
+  CONFLICT: typescript-eslint — typescript-eslint reads types via the TypeScript Compiler API, …
+    Fix: Run typescript-eslint against @typescript/typescript6 side-by-side, or pin typescript to ^6.x
+
+  1 conflict(s) — type-checking/builds will break under TypeScript 7.0.
+```
+
+Exit `1`. Delete `node_modules` and the **lockfile still answers it**, which is
+what a bare `git clone` or a CI job running before `npm ci` looks like:
+
+```
+  typescript latest → TypeScript 7.0.2 detected (locked in package-lock.json, via devDependencies)
+```
+
+Remove the lockfile too and the repo is honestly **undetermined** (exit `0`, no
+conflict invented, `status: "undetermined"`):
+
+```
+  typescript latest → undetermined: dist-tag spec and no installed typescript; run npm install for a definite answer
+```
+
+Add `--strict-undetermined` if your CI would rather fail than pass on a version
+it cannot prove:
+
+```
+  typescript latest → undetermined: dist-tag spec and no installed typescript; run npm install for a definite answer
+    --strict-undetermined: treated as TypeScript 7.0, so conflicts fail the build
+
+  [dependencies]
+  CONFLICT: typescript-eslint — typescript-eslint reads types via the TypeScript Compiler API …
+```
+
 ### Options
 
 | Flag | Default | Meaning |
@@ -168,6 +213,7 @@ make them `conflict`s and exit `1`.
 | `--db <path>` | | JSON of extra `{ "pkg": { "reason", "fix" } }` entries to merge |
 | `--target-ts <v>` | `7.0.2` | Exact TypeScript version the installed-tree peer scan tests ranges against |
 | `--strict-peers` | off | Promote installed-tree peer findings from `warning` to `conflict` (they then fail `--mode fail`) |
+| `--strict-undetermined` | off | Treat an undetermined TypeScript version (unresolvable spec, nothing installed, no lockfile entry) as TypeScript 7, so Compiler-API conflicts and removed tsconfig options fail instead of passing |
 | `--no-peers` | | Skip the installed-tree peer scan |
 | `--no-tsconfig` | | Skip tsconfig.json analysis (dependencies only) |
 | `--no-config` | | Do not read `.ts7guardrc.json` |
@@ -178,7 +224,7 @@ make them `conflict`s and exit `1`.
 | Code | When |
 |------|------|
 | `0` | No build-breaking conflicts (or `--mode warn`). Warnings, notices, advisories & installed-tree peer findings (without `--strict-peers`) do **not** fail. |
-| `1` | A Compiler-API dependency (not TS7-ready, no shim) **or** a removed tsconfig option, while on TypeScript 7.0, **or** an installed-tree peer finding under `--strict-peers` (`--mode fail`) |
+| `1` | A Compiler-API dependency (not TS7-ready, no shim) **or** a removed tsconfig option, while on TypeScript 7.0, **or** an option TypeScript 5.5 already removed, on 5.5 or later, **or** an installed-tree peer finding under `--strict-peers`, **or** an undetermined version under `--strict-undetermined` (`--mode fail`) |
 | `2` | Usage / runtime error (e.g. no `package.json`, invalid `--target-ts`) |
 
 > **Breaking change in v3:** a repo whose flagged dependencies satisfy their
@@ -307,9 +353,21 @@ Removed options detected (each reported with its exact line, `conflict` on TS7 /
 
 `target: es5`/`es3` · `downlevelIteration` · `module: amd`/`umd`/`system`/`none` ·
 `moduleResolution: node`/`node10`/`classic` · `baseUrl` · `esModuleInterop: false` ·
-`allowSyntheticDefaultImports: false` · `alwaysStrict: false` · `out` ·
+`allowSyntheticDefaultImports: false` · `alwaysStrict: false` · `outFile` · `out` ·
 `importsNotUsedAsValues` · `preserveValueImports` · `keyofStringsOnly` ·
-`noImplicitUseStrict` · `noStrictGenericChecks` · `charset` · `references[].prepend`
+`noImplicitUseStrict` · `noStrictGenericChecks` · `charset` ·
+`suppressExcessPropertyErrors` · `suppressImplicitAnyIndexErrors` · `references[].prepend`
+
+`target: es3` and everything from `out` onwards were already removed in
+TypeScript 5.5, so TypeScript 6 rejects them too and they are `conflict` there,
+not `warning`. The exceptions are the flags set to `false` (or
+`importsNotUsedAsValues: "remove"`), which 6.x still accepts. `prepend` goes the
+other way: 5.5 through 6.x reject it, but 7.0 accepts the key and ignores it, so
+on 7.0 it is a `warning` about dead config.
+
+`scripts/tsc-probe.js` (`npm run probe:tsc`) writes a sample of every rule into
+a throwaway project and compiles it with the real TypeScript 6 and 7, failing if
+the guard's severity ever disagrees with what `tsc` does.
 
 JSONC (comments + trailing commas) is parsed correctly, and relative `extends`
 chains are followed so inherited options are still caught.
@@ -345,21 +403,60 @@ jobs:
 ```
 
 **Inputs:** `package-dir`, `mode`, `recursive`, `ignore`, `sarif-file`, `config`,
-`target-ts`, `strict-peers`, `peers`.
-**Outputs:** `ts7`, `conflict-count`, `tsconfig-count`, `advisory-count`,
-`notice-count`, `peer-count`, `shim-detected`, `status`, `json`.
+`target-ts`, `strict-peers`, `strict-undetermined`, `peers`.
+**Outputs:** `ts7`, `ts-version`, `ts-source`, `conflict-count`,
+`tsconfig-count`, `advisory-count`, `notice-count`, `peer-count`,
+`undetermined-count`, `shim-detected`, `status`, `json`.
+
+`ts-version` / `ts-source` let a later step branch on what the guard actually
+resolved (`node_modules`, `lockfile`, `override` or `declared`) rather than on a
+boolean.
 
 Conflicts surface as GitHub **error annotations** — tsconfig ones point at the exact
 `tsconfig.json` line — with warnings when you're still on TS 6 and non-failing notices
 for advisories, plus a job-summary line.
 
+### Runner requirements
+
+`action.yml` declares `runs.using: node24`. GitHub removes Node 20 from the
+Actions runners on **2026-09-23**, and an action still declaring `node20` does
+not launch after that: the runner cannot find the interpreter, so the step fails
+before any of the guard runs. Runners have defaulted to Node 24 since
+2026-06-16, so this changes the declaration and nothing else.
+
+Two runner setups cannot run Node 24:
+
+- **macOS 13.4 and older**, including a `macos-13` runner not patched past 13.4.
+  Node 24 requires macOS >= 13.5. `macos-14` and later are fine.
+- **ARM32 self-hosted runners** (`linux/arm`, armv7l). Node.js publishes no
+  `linux-armv7l` build for 24 at all, and armv7 was downgraded to Experimental
+  in Node 24. ARM64 is unaffected.
+
+On either of those, `ts7-compat-guard@v3.2.0` still declares `node20`, but only
+until 2026-09-23. After that it stops launching anywhere.
+
 ## How detection works
 
-1. Read `package.json`; resolve the **effective** `typescript` version — a top-level
-   `overrides` / `resolutions` / `pnpm.overrides` pin wins over a declared dependency
-   — and flag TS7 when its floor is `>= 7.0.0`. `npm:` alias **targets** are resolved
-   too: any dependency aliased to `npm:typescript@^7` means TS7 *is* installed, and
-   `typescript` aliased to `npm:@typescript/typescript6@…` means the API half is 6.x.
+1. Resolve the **effective** `typescript` version, preferring facts over intent
+   (v3.2). Precedence: **installed → lockfile → override pin → declared range**.
+   - `node_modules/typescript/package.json` (package dir first, then the repo
+     root for hoisted monorepos; pnpm symlinks resolve on read; a manifest whose
+     `name` is not `typescript`, e.g. the TS6 shim aliased under the
+     `typescript` key, never counts).
+   - else a committed **lockfile** — `package-lock.json`, `npm-shrinkwrap.json`,
+     `pnpm-lock.yaml` or `yarn.lock`. This is what answers a bare `git clone`,
+     or CI running the guard before `npm ci`. A lockfile beats an override pin
+     because it records a resolution that already happened, while a pin only
+     says what a future install would do.
+   - else a top-level `overrides` / `resolutions` / `pnpm.overrides` pin, else
+     the declared range's floor.
+
+   TS7 is flagged when the effective version is `>= 7.0.0`. `npm:` alias
+   **targets** are resolved the same way: any dependency aliased to
+   `npm:typescript@…` that resolves to `>= 7` means TS7 *is* present, and
+   `typescript` aliased to `npm:@typescript/typescript6@…` means the API half is
+   6.x. A workspace package that declares no `typescript` inherits the repo
+   root's spec, the same way it already inherits the root's hoisted install.
 2. Cross-reference every other dependency against the readiness ledger (`src/db.json`).
    For each match, resolve the **effective version**: the installed
    `node_modules/<pkg>/package.json` version when present (per package dir, falling
@@ -376,23 +473,41 @@ for advisories, plus a job-summary line.
 5. Read `tsconfig.json` (JSONC + relative `extends`); flag removed options and derive
    advisories. Removed options are never downgraded by the shim.
 
-Non-semver `typescript` specs (`latest`, `*`, git/file URLs) are treated conservatively
-as *not* TS7 to avoid false alarms. Prerelease installed versions are compared with
-`includePrerelease`. Empty or malformed installed manifests fall back to the declared
-range.
+Non-semver `typescript` specs (`latest`, `*`, git/file URLs, `workspace:`,
+`catalog:`) are resolved from the installed tree or the lockfile —
+`"typescript": "latest"` with TS 7.0.2 installed or locked **is** TS7 (as of
+2026-08-29 the npm dist-tag `latest` points at 7.0.2, so an unpinned spec
+installs TypeScript 7). When such a spec cannot be resolved, nothing is
+installed *and* no lockfile entry exists, the scan reports an explicit
+**undetermined** state instead of guessing:
+
+```
+  typescript latest → undetermined: dist-tag spec and no installed typescript; run npm install for a definite answer
+```
+
+No conflict is ever invented from an undetermined state — it exits 0, in the
+same posture as the peer-scan "not run" note, and reports `status:
+"undetermined"` rather than `"clean"` so a machine consumer cannot mistake it
+for a green light. Pass **`--strict-undetermined`** to invert that trade-off and
+treat an unprovable version as TypeScript 7, which fails the build instead of
+passing it. Prerelease installed versions are compared with `includePrerelease`.
+Empty or malformed installed manifests, and malformed or ambiguous lockfiles
+(two different typescript versions in the tree), fall back to the next source
+down and never throw.
 
 ## Covered dependencies
 
 25 packages, each entry carrying `reason`, `fix`, `ts7Status`
 (`none` | `partial` | `supported`), an optional `ts7Ready` range, a `source` URL
-and a `checkedAt` date. **As of 2026-07-29 not one of them ships a bounded
+and a `checkedAt` date. **As of 2026-09-27 not one of them ships a bounded
 typescript peer range that admits 7.x** (typescript-eslint 8.65.0 added a
-"TS 7 detected" *warning* while staying pinned `>=4.8.4 <6.1.0`), so every entry
+"TS 7 detected" *warning* while staying pinned `>=4.8.4 <6.1.0`, still true of
+8.70.1), and `typescript@7.0.2` still exports no Compiler API, so every entry
 truthfully reads `ts7Status: "none"` — no invented version numbers. When the
 ecosystem catches up, `db --check` proposes the exact release, and repos on that
 release start seeing green notices instead of conflicts.
 
-| Package | TS7 status (checked 2026-07-29) |
+| Package | TS7 status (checked 2026-09-27) |
 |---------|--------------------------------|
 | `@vue/language-tools`, `volar`, `@volar/typescript`, `vue-tsc` | none |
 | `@astrojs/language-server`, `@astrojs/check` | none |
@@ -425,11 +540,20 @@ carry the same `ts7Ready` / `ts7Status` / `source` / `checkedAt` fields.
 ```bash
 npm install
 npm run build    # bundle src/action.js -> dist/action.js (esbuild; inlines semver + db.json)
-npm test         # 183 checks: core, tsconfig engine, readiness/shim/alias, installed-tree peer scan, db --check, report, SARIF, CLI (in-process + spawned), Action, bundled dist
+npm test         # 249 checks: core, tsconfig engine, readiness/shim/alias, installed-tree peer scan, effective-TS resolution, db --check, report, SARIF, CLI (in-process + spawned), Action, bundled dist
+npm run probe:tsc # every removed-option rule against real TypeScript 6 and 7 (installs both)
 ```
 
 The Action runs from the committed self-contained bundle `dist/action.js`, so
 **re-run `npm run build` and commit `dist/` before tagging a release** (CI enforces this).
+
+`npm run validate:action` runs `@action-validator/cli` over `action.yml`, but
+does not let it veto the runtime. That package last published 0.6.0 on
+2024-02-23 and compiles its schema into a wasm blob, so its `runs.using` enum
+stops at `node20` and cannot be pointed at a newer copy. The wrapper in
+`scripts/validate-action.js` re-validates the file with the runtime swapped for
+one the schema accepts: if that clears every error, the runtime string was the
+only objection. Any other error still fails.
 
 ## License
 
