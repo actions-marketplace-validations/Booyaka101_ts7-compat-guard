@@ -16,7 +16,7 @@ jobs:
       contents: read
       security-events: write   # only needed for the SARIF upload step
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       # Basic gate: fail the build on an active TypeScript 7.0 conflict.
       - uses: ./                      # consumers: Booyaka101/ts7-compat-guard@v3
